@@ -20,7 +20,7 @@ import type {
 import { seedAll, STORES } from "../data/seed";
 import { normKey } from "../lib/analytics";
 
-const LS_KEY = "cartiq-data-v1";
+const LS_KEY = "cartiq-data-v2";
 const THEME_KEY = "cartiq-theme";
 
 interface DataState {
@@ -39,6 +39,7 @@ type Action =
   | { type: "TOGGLE_LIST_ITEM"; id: string }
   | { type: "REMOVE_LIST_ITEM"; id: string }
   | { type: "SET_LIST_QTY"; id: string; delta: number }
+  | { type: "SWAP_LIST_ITEM"; id: string; key: string }
   | { type: "SET_BUDGETS"; budgets: Budgets }
   | { type: "RESET" };
 
@@ -56,11 +57,11 @@ function mergeCatalog(catalog: CatalogItem[], items: LineItem[], storeId: string
         brand: it.brand,
         cat: it.cat,
         offers: { [storeId]: offer },
-        history: { [storeId]: Array(10).fill(it.price) },
+        history: { [storeId]: Array(26).fill(it.price) },
       });
     } else if (!existing.offers[storeId]) {
       existing.offers = { ...existing.offers, [storeId]: offer };
-      existing.history = { ...existing.history, [storeId]: Array(10).fill(it.price) };
+      existing.history = { ...existing.history, [storeId]: Array(26).fill(it.price) };
     }
   }
   return next;
@@ -121,6 +122,16 @@ function reducer(state: DataState, action: Action): DataState {
           l.id === action.id ? { ...l, qty: Math.max(1, l.qty + action.delta) } : l,
         ),
       };
+    case "SWAP_LIST_ITEM": {
+      const c = state.catalog.find((x) => x.key === action.key);
+      if (!c) return state;
+      return {
+        ...state,
+        list: state.list.map((l) =>
+          l.id === action.id ? { ...l, key: c.key, name: c.name, brand: c.brand } : l,
+        ),
+      };
+    }
     case "SET_BUDGETS":
       return { ...state, budgets: action.budgets };
     case "RESET":
@@ -154,6 +165,7 @@ interface Ctx {
   toggleListItem: (id: string) => void;
   removeListItem: (id: string) => void;
   nudgeListQty: (id: string, delta: number) => void;
+  swapListItem: (id: string, key: string) => void;
   setBudgets: (b: Budgets) => void;
   resetAll: () => void;
   toasts: ToastMsg[];
@@ -210,6 +222,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       toggleListItem: (id) => dispatch({ type: "TOGGLE_LIST_ITEM", id }),
       removeListItem: (id) => dispatch({ type: "REMOVE_LIST_ITEM", id }),
       nudgeListQty: (id, delta) => dispatch({ type: "SET_LIST_QTY", id, delta }),
+      swapListItem: (id, key) => dispatch({ type: "SWAP_LIST_ITEM", id, key }),
       setBudgets: (budgets) => dispatch({ type: "SET_BUDGETS", budgets }),
       resetAll: () => dispatch({ type: "RESET" }),
       toasts,

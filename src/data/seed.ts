@@ -42,17 +42,17 @@ function mulberry32(seed: number) {
   };
 }
 
-/** 10 weekly price points ending exactly at `end`, oldest -> newest. */
-function genHistory(key: string, storeId: string, end: number, vol = 0.045, drift = 0): number[] {
+/** 26 weekly price points (6 months) ending exactly at `end`, oldest -> newest. */
+function genHistory(key: string, storeId: string, end: number, vol = 0.035, drift = 0, n = 26): number[] {
   const rnd = mulberry32(hash(key + "::" + storeId));
   const pts: number[] = [end];
   let v = end;
-  for (let i = 1; i < 10; i++) {
+  for (let i = 1; i < n; i++) {
     const shock = (rnd() - 0.5) * 2 * vol;
     v = v / (1 + shock + drift);
     pts.unshift(Math.max(0.1, v));
   }
-  return pts.map((p, i) => (i === 9 ? end : Math.round(p * 100) / 100));
+  return pts.map((p, i) => (i === n - 1 ? end : Math.round(p * 100) / 100));
 }
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
@@ -66,6 +66,7 @@ interface Spec {
   offers: Partial<Record<string, { qty: number; unit: Unit; price: number }>>;
   vol?: number;
   drift?: number;
+  swapFor?: string;
 }
 
 const SPECS: Spec[] = [
@@ -87,6 +88,12 @@ const SPECS: Spec[] = [
   { name: "Orange Juice 1L", brand: "SunPress", cat: "beverages", offers: { freshmart: { qty: 1, unit: "L", price: 3.89 }, valuebarn: { qty: 1, unit: "L", price: 2.99 }, metro: { qty: 1, unit: "L", price: 3.59 }, corner: { qty: 1, unit: "L", price: 4.39 } }, vol: 0.03 },
   { name: "Ground Beef 80/20", brand: "", cat: "meat", offers: { freshmart: { qty: 1, unit: "kg", price: 9.99 }, valuebarn: { qty: 1, unit: "kg", price: 8.29 }, metro: { qty: 1, unit: "kg", price: 10.49 }, corner: { qty: 0.5, unit: "kg", price: 6.19 } }, vol: 0.05 },
   { name: "Salted Butter 250g", brand: "DairyPure", cat: "dairy", offers: { freshmart: { qty: 1, unit: "each", price: 3.29 }, valuebarn: { qty: 1, unit: "each", price: 2.59 }, metro: { qty: 1, unit: "each", price: 3.09 }, corner: { qty: 1, unit: "each", price: 3.79 } }, vol: 0.02 },
+  /* --- store-brand value alternatives (Swap & Save candidates) --- */
+  { name: "Whole Milk 1L", brand: "ValueFarm", cat: "dairy", swapFor: "whole-milk|dairypure", offers: { freshmart: { qty: 1, unit: "L", price: 1.49 }, valuebarn: { qty: 2, unit: "L", price: 2.39 }, metro: { qty: 1, unit: "L", price: 1.39 }, corner: { qty: 1, unit: "L", price: 1.89 } }, vol: 0.02 },
+  { name: "Table Eggs 12pk", brand: "ValueFarm", cat: "dairy", swapFor: "free-range-eggs|happy-hen", offers: { freshmart: { qty: 12, unit: "pack", price: 3.19 }, valuebarn: { qty: 12, unit: "pack", price: 2.69 }, metro: { qty: 12, unit: "pack", price: 2.99 }, corner: { qty: 6, unit: "pack", price: 2.09 } }, vol: 0.04 },
+  { name: "Penne Rigate 500g", brand: "StoreBrand", cat: "pantry", swapFor: "penne-rigate-500g|pastifica", offers: { freshmart: { qty: 1, unit: "each", price: 1.39 }, valuebarn: { qty: 1, unit: "each", price: 0.89 }, metro: { qty: 1, unit: "each", price: 1.29 }, corner: { qty: 1, unit: "each", price: 1.69 } }, vol: 0.02 },
+  { name: "House Blend Coffee 1kg", brand: "Roastline", cat: "beverages", swapFor: "arabica-coffee-beans|roastline", offers: { freshmart: { qty: 1, unit: "kg", price: 11.99 }, valuebarn: { qty: 1, unit: "kg", price: 9.99 }, metro: { qty: 1, unit: "kg", price: 10.49 }, corner: { qty: 250, unit: "g", price: 3.29 } }, vol: 0.04 },
+  { name: "Olive Oil, Pure 1L", brand: "Olea", cat: "pantry", swapFor: "olive-oil-extra-virgin|olea", offers: { freshmart: { qty: 750, unit: "ml", price: 6.49 }, valuebarn: { qty: 1, unit: "L", price: 8.49 }, metro: { qty: 750, unit: "ml", price: 6.99 }, corner: { qty: 500, unit: "ml", price: 5.29 } }, vol: 0.03 },
 ];
 
 export function buildCatalog(): CatalogItem[] {
@@ -97,9 +104,9 @@ export function buildCatalog(): CatalogItem[] {
     for (const [storeId, o] of Object.entries(s.offers)) {
       if (!o) continue;
       offers[storeId] = { ...o };
-      history[storeId] = genHistory(key, storeId, o.price, s.vol ?? 0.045, s.drift ?? 0);
+      history[storeId] = genHistory(key, storeId, o.price, s.vol ?? 0.035, s.drift ?? 0);
     }
-    return { key, name: s.name, brand: s.brand, cat: s.cat, offers, history };
+    return { key, name: s.name, brand: s.brand, cat: s.cat, offers, history, swapFor: s.swapFor };
   });
 }
 
@@ -133,9 +140,9 @@ function groceryReceipt(catalog: CatalogItem[], spec: GrocerySpec, idx: number):
   const items: LineItem[] = spec.lines.map(([name, qty], i) => {
     const c = catalog.find((x) => x.name === name)!;
     const o = c.offers[spec.storeId];
-    const weekIdx = Math.min(9, Math.floor(spec.daysAgo / 7));
+    const weekIdx = Math.min(25, Math.floor(spec.daysAgo / 7));
     const series = c.history[spec.storeId];
-    const price = round2(series[9 - weekIdx] ?? o.price);
+    const price = round2(series[25 - weekIdx] ?? o.price);
     return {
       id: `gr${idx}-i${i}`,
       name: c.name,

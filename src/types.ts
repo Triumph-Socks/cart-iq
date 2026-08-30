@@ -52,7 +52,8 @@ export interface CatalogItem {
   brand: string;
   cat: ItemCat;
   offers: Record<string, StoreOffer>; // storeId -> offer
-  history: Record<string, number[]>; // storeId -> 10 weekly pack prices, oldest -> newest
+  history: Record<string, number[]>; // storeId -> 26 weekly pack prices (6 months), oldest -> newest
+  swapFor?: string; // catalog key of the premium product this item can replace
 }
 
 export interface ShopItem {

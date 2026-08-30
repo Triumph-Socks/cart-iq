@@ -16,7 +16,10 @@ import { Badge, Meter } from "./ui";
 import { StoreLines } from "./charts";
 import { STORES } from "../data/seed";
 
-const WEEK_LABELS = ["-9w", "-8w", "-7w", "-6w", "-5w", "-4w", "-3w", "-2w", "-1w", "now"];
+const weekLabels = (len: number) =>
+  Array.from({ length: Math.max(len, 2) }, (_, i) =>
+    i === len - 1 ? "now" : `-${len - 1 - i}w`,
+  );
 
 export default function ItemDrawer({
   itemKey,
@@ -182,12 +185,35 @@ export default function ItemDrawer({
                 </div>
               </section>
 
+              {/* unit-price math */}
+              <section>
+                <h4 className="eyebrow mb-2 text-slate-500">Unit-price math</h4>
+                <div className="card divide-y divide-slate-900/6 dark:divide-white/5">
+                  {offers.map((o) => {
+                    const store = STORES.find((s) => s.id === o.storeId);
+                    return (
+                      <div key={o.storeId} className="flex items-center justify-between gap-3 px-3.5 py-2.5">
+                        <span className="flex items-center gap-2 text-[12px] font-bold text-slate-700 dark:text-slate-200">
+                          <span className="h-2 w-2 rounded-full" style={{ background: store?.color }} />
+                          {store?.name ?? o.storeId}
+                        </span>
+                        <span className="num text-[11.5px] text-slate-500 dark:text-slate-400">
+                          {fmtMoney(o.price)} ÷ {o.qty}
+                          {o.unit} ={" "}
+                          <b className="text-slate-900 dark:text-white">{fmtPerBase(o.pb)}</b>
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </section>
+
               {/* history */}
               <section>
-                <h4 className="eyebrow mb-2 text-slate-500">10-week trend · normalized per base unit</h4>
+                <h4 className="eyebrow mb-2 text-slate-500">6-month trend · normalized per base unit</h4>
                 <div className="card p-3">
                   {series.length ? (
-                    <StoreLines series={series} labels={WEEK_LABELS} />
+                    <StoreLines series={series} labels={weekLabels(series[0].points.length)} />
                   ) : (
                     <p className="py-8 text-center text-xs text-slate-400">No price history yet</p>
                   )}
