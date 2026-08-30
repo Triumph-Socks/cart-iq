@@ -1,317 +1,581 @@
-import { useMemo, useRef, useState } from "react";
-import { motion } from "framer-motion";
-import { Award, ChevronDown, Radar, Search, TrendingDown, TrendingUp } from "lucide-react";
+import { useMemo, useState } from "react";
+import { motion, useReducedMotion } from "framer-motion";
+import {
+  Award,
+  Radar as RadarIcon,
+  Search,
+  Store as StoreIcon,
+  TrendingUp,
+  X,
+} from "lucide-react";
+import {
+  PolarAngleAxis,
+  PolarGrid,
+  PolarRadiusAxis,
+  Radar as RechartsRadar,
+  RadarChart,
+  ResponsiveContainer,
+  Tooltip,
+} from "recharts";
 import { useApp } from "../store/AppContext";
 import {
   bestOffer,
   fmtMoney,
   fmtPerBase,
+  ITEM_CATS,
   offersOf,
-  perBase,
+  storeAffordability,
   worthIndex,
 } from "../lib/analytics";
-import { Badge, Meter, Reveal } from "../components/ui";
-import { StoreLines } from "../components/charts";
+import { Badge, Empty, Meter, Reveal } from "../components/ui";
 import { STORES } from "../data/seed";
+import type { CatalogItem, ItemCat } from "../types";
 
-const WEEK_LABELS = ["-9w", "-8w", "-7w", "-6w", "-5w", "-4w", "-3w", "-2w", "-1w", "now"];
+type Mode = "listed" | "norm";
+type SortKey = "gap" | "az" | "cheap";
 
-export default function Compare({
-  onOpenItem,
-}: {
-  onOpenItem: (key: string) => void;
-}) {
-  const { state } = useApp();
-  const [selectedKey, setSelectedKey] = useState(state.catalog[0]?.key ?? "");
-  const [query, setQuery] = useState("");
-  const [comboOpen, setComboOpen] = useState(false);
-  const [sortDesc, setSortDesc] = useState(true);
-  const inputRef = useRef<HTMLInputElement>(null);
+/* ---------------- row model ---------------- */
 
-  const item = state.catalog.find((c) => c.key === selectedKey) ?? state.catalog[0];
+interface CellModel {
+  storeId: string;
+  price: number;
+  qty: number;
+  unit: string;
+  pb: { v: number; suffix: string };
+  v: number; // value in the active display mode
+  pct: number; // % vs market average
+  isBest: boolean;
+  isSpike: boolean;
+}
 
-  const offers = useMemo(
-    () =>
-      item
-        ? offersOf(item)
-            .sort((a, b) => a.pb.v - b.pb.v)
-            .map((o, rank) => ({ ...o, rank, worth: worthIndex(item, o.storeId) ?? 0 }))
-        : [],
-    [item],
-  );
+interface RowModel {
+  item: CatalogItem;
+  cells: CellModel[];
+  gapPct: number;
+  bestStore: string;
+}
 
-  const series = useMemo(() => {
-    if (!item) return [];
-    return STORES.filter((s) => item.history[s.id]?.length).map((s) => {
-      const offer = item.offers[s.id];
+function buildRows(catalog: CatalogItem[], mode: Mode): RowModel[] {
+  return catalog.map((item) => {
+    const offers = offersOf(item);
+    const enriched = offers.map((o) => ({
+      ...o,
+      v: mode === "norm" ? o.pb.v : o.price,
+    }));
+    const vals = enriched.map((o) => o.v);
+    const avg = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : 0;
+    const min = Math.min(...vals);
+    const max = Math.max(...vals);
+    const best = bestOffer(item);
+    const cells: CellModel[] = STORES.map((s) => {
+      const o = enriched.find((x) => x.storeId === s.id);
+      if (!o) {
+        return {
+          storeId: s.id,
+          price: 0,
+          qty: 0,
+          unit: "",
+          pb: { v: 0, suffix: "" },
+          v: 0,
+          pct: 0,
+          isBest: false,
+          isSpike: false,
+        };
+      }
+      const pct = avg > 0 ? ((o.v - avg) / avg) * 100 : 0;
+      const isBest = enriched.length > 1 && o.v === min && o.v > 0;
       return {
-        store: s,
-        points: item.history[s.id].map((p) =>
-          offer ? Math.round(perBase(p, offer.qty, offer.unit).v * 100) / 100 : p,
-        ),
+        storeId: s.id,
+        price: o.price,
+        qty: o.qty,
+        unit: o.unit,
+        pb: o.pb,
+        v: o.v,
+        pct,
+        isBest,
+        isSpike: !isBest && pct >= 15,
       };
     });
-  }, [item]);
+    return {
+      item,
+      cells,
+      gapPct: avg > 0 ? ((max - min) / avg) * 100 : 0,
+      bestStore: best?.storeId ?? "",
+    };
+  });
+}
 
-  const board = useMemo(() => {
-    const rows = state.catalog.map((c) => {
-      const sorted = offersOf(c).sort((a, b) => a.pb.v - b.pb.v);
-      const best = sorted[0];
-      const worst = sorted[sorted.length - 1];
-      const spread = best && worst && best.pb.v > 0 ? ((worst.pb.v - best.pb.v) / best.pb.v) * 100 : 0;
-      return { item: c, best, worst, spread, n: sorted.length };
-    });
-    return rows.sort((a, b) => (sortDesc ? b.spread - a.spread : a.spread - b.spread));
-  }, [state.catalog, sortDesc]);
+/* ---------------- radar tooltip ---------------- */
 
-  const filtered = query
-    ? state.catalog.filter((c) =>
-        (c.name + " " + c.brand).toLowerCase().includes(query.toLowerCase()),
-      )
-    : state.catalog;
-
-  if (!item) return null;
-  const best = offers[0];
-  const worst = offers[offers.length - 1];
-  const spread = best && worst && best.pb.v > 0 ? ((worst.pb.v - best.pb.v) / best.pb.v) * 100 : 0;
-
+function RadarTip({ active, payload, label }: any) {
+  if (!active || !payload?.length) return null;
   return (
-    <div className="space-y-4">
-      {/* picker + summary */}
-      <Reveal>
-        <div className="card flex flex-col gap-4 p-4 sm:flex-row sm:items-center">
-          <div className="relative w-full sm:max-w-[320px]">
-            <div className="relative">
-              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-              <input
-                ref={inputRef}
-                className="field !pl-9"
-                placeholder="Search tracked products…"
-                value={comboOpen ? query : item.name + (item.brand ? ` · ${item.brand}` : "")}
-                onFocus={() => {
-                  setComboOpen(true);
-                  setQuery("");
-                }}
-                onChange={(e) => setQuery(e.target.value)}
-              />
-              <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+    <div className="card px-3 py-2 text-xs shadow-xl">
+      <p className="eyebrow mb-1.5 capitalize text-slate-500 dark:text-slate-400">{label}</p>
+      <div className="space-y-1">
+        {[...payload]
+          .sort((a: any, b: any) => (b.value ?? 0) - (a.value ?? 0))
+          .map((p: any) => (
+            <div key={p.dataKey} className="flex items-center justify-between gap-5">
+              <span className="flex items-center gap-1.5 font-medium text-slate-600 dark:text-slate-300">
+                <span className="h-2 w-2 rounded-full" style={{ background: p.color }} />
+                {p.name}
+              </span>
+              <span className="num font-semibold text-slate-900 dark:text-white">
+                {(p.value ?? 0).toFixed(0)}
+              </span>
             </div>
-            {comboOpen && (
-              <>
-                <div className="fixed inset-0 z-10" onClick={() => setComboOpen(false)} />
-                <div className="card scroll-slim absolute z-20 mt-1.5 max-h-72 w-full overflow-y-auto p-1.5 shadow-2xl">
-                  {filtered.map((c) => (
-                    <button
-                      key={c.key}
-                      onClick={() => {
-                        setSelectedKey(c.key);
-                        setComboOpen(false);
-                      }}
-                      className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-[13px] font-semibold text-slate-700 transition-colors hover:bg-emerald-500/8 dark:text-slate-200"
-                    >
-                      <span>
-                        {c.name}
-                        {c.brand && <span className="ml-1.5 text-[11px] font-medium text-slate-400">{c.brand}</span>}
-                      </span>
-                      <span className="num text-[11px] text-slate-400">{Object.keys(c.offers).length} stores</span>
-                    </button>
-                  ))}
-                  {!filtered.length && (
-                    <p className="px-3 py-4 text-center text-xs text-slate-400">No tracked products match.</p>
-                  )}
-                </div>
-              </>
-            )}
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2 sm:ml-auto">
-            <Badge tone="emerald">
-              <Award className="h-3 w-3" />
-              best: {STORES.find((s) => s.id === best?.storeId)?.name ?? "—"} @ {best ? fmtPerBase(best.pb) : "—"}
-            </Badge>
-            <Badge tone={spread > 25 ? "rose" : spread > 12 ? "amber" : "emerald"}>
-              spread {spread.toFixed(0)}%
-            </Badge>
-            <Badge tone="sky">{offers.length} stores stocking</Badge>
-          </div>
-        </div>
-      </Reveal>
-
-      <div className="grid grid-cols-12 gap-4">
-        {/* trend */}
-        <Reveal className="col-span-12 xl:col-span-7">
-          <div className="card card-hover h-full p-5">
-            <div className="mb-2 flex items-center justify-between">
-              <div>
-                <p className="eyebrow text-emerald-600/80 dark:text-emerald-400/80">10-week price history</p>
-                <h3 className="font-display mt-0.5 text-[16px] font-bold text-slate-900 dark:text-white">
-                  {item.name} <span className="text-slate-400">· normalized per base unit</span>
-                </h3>
-              </div>
-              <Radar className="h-5 w-5 text-emerald-500" />
-            </div>
-            <StoreLines series={series} labels={WEEK_LABELS} />
-            <div className="mt-2 flex flex-wrap gap-3">
-              {series.map((s) => (
-                <span key={s.store.id} className="flex items-center gap-1.5 text-[11px] font-bold text-slate-500">
-                  <span className="h-1.5 w-4 rounded-full" style={{ background: s.store.color }} />
-                  {s.store.name}
-                </span>
-              ))}
-            </div>
-          </div>
-        </Reveal>
-
-        {/* ranking */}
-        <Reveal delay={0.07} className="col-span-12 xl:col-span-5">
-          <div className="card card-hover h-full p-5">
-            <p className="eyebrow mb-3 text-slate-500">Worthey & Low-Cost ranking</p>
-            <div className="space-y-2.5">
-              {offers.map((o) => {
-                const store = STORES.find((s) => s.id === o.storeId);
-                const delta = best && best.pb.v > 0 ? ((o.pb.v - best.pb.v) / best.pb.v) * 100 : 0;
-                return (
-                  <motion.div key={o.storeId} layout className="rounded-xl border border-slate-900/8 p-3 transition-colors hover:border-emerald-500/35 dark:border-white/8">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <span
-                          className={`num grid h-6 w-6 place-items-center rounded-md text-[11px] font-semibold ${
-                            o.rank === 0 ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-300" : "bg-slate-500/10 text-slate-500"
-                          }`}
-                        >
-                          {o.rank + 1}
-                        </span>
-                        <span className="h-2 w-2 rounded-full" style={{ background: store?.color }} />
-                        <span className="text-[13px] font-bold text-slate-800 dark:text-slate-100">{store?.name}</span>
-                      </div>
-                      <div className="text-right">
-                        <p className="num text-[13px] font-semibold text-slate-900 dark:text-white">{fmtMoney(o.price)}</p>
-                        <p className="num text-[10.5px] text-slate-400">
-                          {o.qty !== 1 || !["each", "pack"].includes(o.unit) ? `${o.qty}${o.unit} pack · ` : ""}
-                          {fmtPerBase(o.pb)}
-                        </p>
-                      </div>
-                    </div>
-                    <div className="mt-2 flex items-center gap-2.5">
-                      <div className="flex-1">
-                        <Meter value={o.worth} color={o.worth >= 96 ? "#34d399" : o.worth >= 88 ? "#fbbf24" : "#fb7185"} />
-                      </div>
-                      <span className="num w-8 text-right text-[11px] font-semibold text-slate-500">{o.worth.toFixed(0)}</span>
-                      <span
-                        className={`num flex w-16 items-center justify-end gap-0.5 text-[11px] font-bold ${
-                          delta <= 0.1 ? "text-emerald-500" : delta > 12 ? "text-rose-500" : "text-amber-500"
-                        }`}
-                      >
-                        {delta <= 0.1 ? "best" : `+${delta.toFixed(0)}%`}
-                      </span>
-                    </div>
-                  </motion.div>
-                );
-              })}
-            </div>
-            {offers.length > 1 && (
-              <p className="mt-3 text-[11.5px] font-medium leading-relaxed text-slate-500">
-                Buying {item.name} at <strong className="text-emerald-600 dark:text-emerald-400">{STORES.find((s) => s.id === best?.storeId)?.name}</strong>{" "}
-                instead of {STORES.find((s) => s.id === worst?.storeId)?.name} saves{" "}
-                <strong className="text-emerald-600 dark:text-emerald-400">{fmtMoney(worst!.price - (best!.price * (worst!.qty * factorOf(worst!) / (best!.qty * factorOf(best!)))))}</strong>{" "}
-                per comparable pack.
-              </p>
-            )}
-          </div>
-        </Reveal>
+          ))}
       </div>
-
-      {/* variance board */}
-      <Reveal>
-        <div className="card overflow-hidden">
-          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-900/8 p-4 dark:border-white/6">
-            <div>
-              <p className="eyebrow text-emerald-600/80 dark:text-emerald-400/80">Variance board</p>
-              <h3 className="font-display mt-0.5 text-[16px] font-bold text-slate-900 dark:text-white">
-                Where prices disagree the most
-              </h3>
-            </div>
-            <button
-              onClick={() => setSortDesc((v) => !v)}
-              className="flex items-center gap-1.5 rounded-lg border border-slate-900/10 px-3 py-1.5 text-[11.5px] font-bold text-slate-600 transition-colors hover:bg-slate-900/4 dark:border-white/10 dark:text-slate-300 dark:hover:bg-white/5"
-            >
-              {sortDesc ? <TrendingDown className="h-3.5 w-3.5" /> : <TrendingUp className="h-3.5 w-3.5" />}
-              Spread {sortDesc ? "high → low" : "low → high"}
-            </button>
-          </div>
-          <div className="overflow-x-auto scroll-slim">
-            <table className="w-full min-w-[680px] text-left">
-              <thead>
-                <tr className="border-b border-slate-900/8 text-[10.5px] uppercase tracking-[0.14em] text-slate-400 dark:border-white/6">
-                  <th className="px-4 py-2.5 font-semibold">Product</th>
-                  <th className="px-4 py-2.5 font-semibold">Aisle</th>
-                  <th className="px-4 py-2.5 font-semibold">Cheapest</th>
-                  <th className="px-4 py-2.5 font-semibold">Priciest</th>
-                  <th className="px-4 py-2.5 text-right font-semibold">Spread</th>
-                </tr>
-              </thead>
-              <tbody>
-                {board.map(({ item: c, best: b, worst: w, spread: sp, n }) => (
-                  <tr
-                    key={c.key}
-                    onClick={() => {
-                      setSelectedKey(c.key);
-                      window.scrollTo({ top: 0, behavior: "smooth" });
-                    }}
-                    className={`cursor-pointer border-b border-slate-900/5 transition-colors last:border-0 hover:bg-emerald-500/[0.04] dark:border-white/4 ${
-                      c.key === item.key ? "bg-emerald-500/[0.05]" : ""
-                    }`}
-                  >
-                    <td className="px-4 py-2.5">
-                      <p className="text-[13px] font-bold text-slate-800 dark:text-slate-100">{c.name}</p>
-                      {c.brand && <p className="text-[10.5px] font-medium text-slate-400">{c.brand}</p>}
-                    </td>
-                    <td className="px-4 py-2.5">
-                      <Badge tone="slate" className="capitalize">{c.cat}</Badge>
-                    </td>
-                    <td className="px-4 py-2.5">
-                      {b ? (
-                        <span className="flex items-center gap-1.5 text-[12px] font-semibold text-emerald-600 dark:text-emerald-400">
-                          <span className="h-1.5 w-1.5 rounded-full" style={{ background: STORES.find((s) => s.id === b.storeId)?.color }} />
-                          {STORES.find((s) => s.id === b.storeId)?.name}
-                          <span className="num text-slate-500">· {fmtPerBase(b.pb)}</span>
-                        </span>
-                      ) : "—"}
-                    </td>
-                    <td className="px-4 py-2.5">
-                      {w && n > 1 ? (
-                        <span className="flex items-center gap-1.5 text-[12px] font-semibold text-rose-500 dark:text-rose-300">
-                          <span className="h-1.5 w-1.5 rounded-full" style={{ background: STORES.find((s) => s.id === w.storeId)?.color }} />
-                          {STORES.find((s) => s.id === w.storeId)?.name}
-                          <span className="num text-slate-500">· {fmtPerBase(w.pb)}</span>
-                        </span>
-                      ) : (
-                        <span className="text-xs text-slate-400">single source</span>
-                      )}
-                    </td>
-                    <td className="px-4 py-2.5 text-right">
-                      <span
-                        className={`num rounded-md px-2 py-0.5 text-[12px] font-bold ${
-                          sp > 25
-                            ? "bg-rose-500/10 text-rose-500 dark:bg-rose-500/12 dark:text-rose-300"
-                            : sp > 12
-                              ? "bg-amber-500/10 text-amber-600 dark:bg-amber-500/12 dark:text-amber-300"
-                              : "bg-emerald-500/10 text-emerald-600 dark:bg-emerald-500/12 dark:text-emerald-300"
-                        }`}
-                      >
-                        {sp.toFixed(0)}%
-                      </span>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </Reveal>
     </div>
   );
 }
 
-const factorOf = (o: { qty: number; unit: string }) =>
-  o.unit === "kg" ? 1000 : o.unit === "lbs" ? 453.592 : o.unit === "L" ? 1000 : o.unit === "g" || o.unit === "ml" ? 1 : 1;
+/* ---------------- page ---------------- */
+
+export default function Compare({ onOpenItem }: { onOpenItem: (key: string) => void }) {
+  const { state } = useApp();
+  const reduce = useReducedMotion();
+  const [query, setQuery] = useState("");
+  const [cat, setCat] = useState<"all" | ItemCat>("all");
+  const [mode, setMode] = useState<Mode>("norm");
+  const [sort, setSort] = useState<SortKey>("gap");
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return state.catalog.filter(
+      (c) =>
+        (cat === "all" || c.cat === cat) &&
+        (!q || c.name.toLowerCase().includes(q) || c.brand.toLowerCase().includes(q)),
+    );
+  }, [state.catalog, query, cat]);
+
+  const rows = useMemo(() => {
+    const built = buildRows(filtered, mode);
+    if (sort === "az") built.sort((a, b) => a.item.name.localeCompare(b.item.name));
+    if (sort === "gap") built.sort((a, b) => b.gapPct - a.gapPct);
+    if (sort === "cheap")
+      built.sort((a, b) => {
+        const pa = bestOffer(a.item)?.pb.v ?? Infinity;
+        const pb2 = bestOffer(b.item)?.pb.v ?? Infinity;
+        return pa - pb2;
+      });
+    return built;
+  }, [filtered, mode, sort]);
+
+  const avgGap = rows.length ? rows.reduce((a, r) => a + r.gapPct, 0) / rows.length : 0;
+  const spikiest = rows.reduce<RowModel | null>(
+    (acc, r) => (acc === null || r.gapPct > acc.gapPct ? r : acc),
+    null,
+  );
+
+  /* radar: average worthey index per aisle per store */
+  const radarCats = useMemo(() => {
+    const present = ITEM_CATS.filter((c) => filtered.some((i) => i.cat === c));
+    return (present.length >= 3 ? present : [...ITEM_CATS]) as string[];
+  }, [filtered]);
+
+  const radarData = useMemo(
+    () =>
+      radarCats.map((c) => {
+        const row: Record<string, number | string> = { cat: c };
+        for (const s of STORES) {
+          const items = filtered.filter((i) => i.cat === c);
+          const pool = items.length ? items : state.catalog.filter((i) => i.cat === c);
+          const vals = pool
+            .map((i) => worthIndex(i, s.id))
+            .filter((x): x is number => x !== null);
+          row[s.id] = vals.length
+            ? Math.round((vals.reduce((a, b) => a + b, 0) / vals.length) * 10) / 10
+            : 76;
+        }
+        return row;
+      }),
+    [radarCats, filtered, state.catalog],
+  );
+
+  const ranking = useMemo(
+    () =>
+      STORES.map((s) => ({ store: s, score: storeAffordability(state.catalog, s.id) ?? 0 }))
+        .sort((a, b) => b.score - a.score)
+        .map((r, i) => ({ ...r, rank: i })),
+    [state.catalog],
+  );
+
+  const catCounts = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const c of state.catalog) m.set(c.cat, (m.get(c.cat) ?? 0) + 1);
+    return m;
+  }, [state.catalog]);
+
+  return (
+    <div className="space-y-5">
+      {/* ------- control deck ------- */}
+      <Reveal>
+        <div className="card p-4">
+          <div className="flex flex-col gap-3 xl:flex-row xl:items-center">
+            {/* search */}
+            <div className="relative min-w-0 flex-1">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+              <input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Search items or brands — try “eggs” or “Olea”…"
+                className="field pl-9 pr-8"
+                aria-label="Search tracked items"
+              />
+              {query && (
+                <button
+                  onClick={() => setQuery("")}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded p-0.5 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+                  aria-label="Clear search"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
+
+            {/* mode toggle */}
+            <div className="flex shrink-0 items-center gap-1 rounded-[10px] border border-slate-900/10 bg-slate-500/5 p-1 dark:border-white/10">
+              {(
+                [
+                  { id: "listed", label: "As listed" },
+                  { id: "norm", label: "Normalized" },
+                ] as { id: Mode; label: string }[]
+              ).map((m) => (
+                <button
+                  key={m.id}
+                  onClick={() => setMode(m.id)}
+                  className={`relative rounded-lg px-3 py-1.5 text-[12px] font-bold transition-colors ${
+                    mode === m.id
+                      ? "text-emerald-700 dark:text-emerald-300"
+                      : "text-slate-500 hover:text-slate-700 dark:hover:text-slate-300"
+                  }`}
+                >
+                  {mode === m.id && (
+                    <motion.span
+                      layoutId="mode-pill"
+                      className="absolute inset-0 rounded-lg bg-emerald-500/15 ring-1 ring-inset ring-emerald-500/30"
+                      transition={reduce ? { duration: 0 } : { type: "spring", stiffness: 420, damping: 34 }}
+                    />
+                  )}
+                  <span className="relative">{m.label}</span>
+                </button>
+              ))}
+            </div>
+
+            {/* sort */}
+            <label className="flex shrink-0 items-center gap-2 text-[11px] font-semibold text-slate-500">
+              Sort
+              <select
+                value={sort}
+                onChange={(e) => setSort(e.target.value as SortKey)}
+                className="field w-auto py-1.5 text-[12px]"
+              >
+                <option value="gap">Biggest price gap</option>
+                <option value="az">Name A–Z</option>
+                <option value="cheap">Cheapest base unit</option>
+              </select>
+            </label>
+          </div>
+
+          {/* aisle pills */}
+          <div className="scroll-slim mt-3 flex items-center gap-1.5 overflow-x-auto pb-0.5">
+            {([{ id: "all", label: "All aisles" }] as { id: "all" | ItemCat; label: string }[])
+              .concat(ITEM_CATS.map((c) => ({ id: c as "all" | ItemCat, label: c })))
+              .map((p) => {
+                const active = cat === p.id;
+                return (
+                  <button
+                    key={p.id}
+                    onClick={() => setCat(p.id)}
+                    className={`relative shrink-0 rounded-full px-3 py-1.5 text-[11.5px] font-bold capitalize transition-colors ${
+                      active
+                        ? "text-emerald-800 dark:text-emerald-200"
+                        : "text-slate-500 hover:text-slate-700 dark:hover:text-slate-300"
+                    }`}
+                  >
+                    {active && (
+                      <motion.span
+                        layoutId="aisle-pill"
+                        className="absolute inset-0 rounded-full bg-emerald-500/15 ring-1 ring-inset ring-emerald-500/30"
+                        transition={reduce ? { duration: 0 } : { type: "spring", stiffness: 420, damping: 34 }}
+                      />
+                    )}
+                    <span className="relative flex items-center gap-1.5">
+                      {p.label}
+                      <span className={`num text-[10px] ${active ? "text-emerald-600 dark:text-emerald-300" : "text-slate-400"}`}>
+                        {p.id === "all" ? state.catalog.length : catCounts.get(p.id) ?? 0}
+                      </span>
+                    </span>
+                  </button>
+                );
+              })}
+          </div>
+        </div>
+      </Reveal>
+
+      {/* ------- market pulse chips ------- */}
+      <Reveal delay={0.05}>
+        <div className="grid gap-3 sm:grid-cols-3">
+          <div className="card card-hover p-3.5">
+            <p className="eyebrow text-slate-400">Tracked in view</p>
+            <p className="num mt-1 text-xl font-bold text-slate-900 dark:text-white">
+              {filtered.length}
+              <span className="ml-1 text-[12px] font-medium text-slate-400">/ {state.catalog.length} items</span>
+            </p>
+          </div>
+          <div className="card card-hover p-3.5">
+            <p className="eyebrow text-slate-400">Avg store spread</p>
+            <p className={`num mt-1 text-xl font-bold ${avgGap > 20 ? "text-rose-500" : avgGap > 10 ? "text-amber-500" : "text-emerald-500"}`}>
+              {avgGap.toFixed(1)}%
+            </p>
+          </div>
+          <div className="card card-hover flex items-center justify-between gap-3 p-3.5">
+            <div>
+              <p className="eyebrow text-slate-400">Wildest swing</p>
+              <p className="mt-1 truncate text-[13px] font-bold text-slate-900 dark:text-white">
+                {spikiest ? spikiest.item.name : "—"}
+              </p>
+            </div>
+            {spikiest && (
+              <Badge tone="rose" className="shrink-0">
+                <TrendingUp className="h-3 w-3" /> {spikiest.gapPct.toFixed(0)}% gap
+              </Badge>
+            )}
+          </div>
+        </div>
+      </Reveal>
+
+      <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_360px]">
+        {/* ------- matrix table ------- */}
+        <Reveal delay={0.08}>
+          <div className="card overflow-hidden">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-900/8 px-4 py-3 dark:border-white/6">
+              <div>
+                <h3 className="font-display text-[15px] font-bold tracking-tight text-slate-900 dark:text-white">
+                  Store × item price matrix
+                </h3>
+                <p className="text-[11px] text-slate-500">
+                  {mode === "norm" ? "Normalized to price per 100g / 100ml / piece" : "Shelf price as listed — pack sizes shown below"}
+                  {" · "}Δ vs market average · click a row for the full dossier
+                </p>
+              </div>
+              <div className="flex items-center gap-3 text-[10.5px] font-semibold text-slate-500">
+                <span className="flex items-center gap-1.5">
+                  <span className="h-2.5 w-2.5 rounded-[4px] bg-emerald-500/30 ring-1 ring-emerald-500/50" /> Best value
+                </span>
+                <span className="flex items-center gap-1.5">
+                  <span className="h-2.5 w-2.5 rounded-[4px] bg-rose-500/30 ring-1 ring-rose-500/50" /> Spike ≥15%
+                </span>
+              </div>
+            </div>
+
+            {rows.length === 0 ? (
+              <Empty
+                icon={<Search className="h-5 w-5" />}
+                title="No items match"
+                hint="Try a different search term or switch aisle — the radar tracks everything else."
+              />
+            ) : (
+              <div className="scroll-slim overflow-x-auto">
+                <table className="w-full min-w-[780px] border-collapse text-left">
+                  <thead>
+                    <tr className="border-b border-slate-900/8 text-[11px] dark:border-white/6">
+                      <th className="sticky left-0 z-10 bg-mist-50 px-4 py-2.5 font-semibold uppercase tracking-wide text-slate-400 dark:bg-night-900">
+                        Item
+                      </th>
+                      {STORES.map((s) => (
+                        <th key={s.id} className="px-3 py-2.5 font-semibold text-slate-500 dark:text-slate-300">
+                          <span className="flex items-center gap-1.5">
+                            <span className="h-2 w-2 rounded-full" style={{ background: s.color }} />
+                            {s.name}
+                          </span>
+                        </th>
+                      ))}
+                      <th className="px-3 py-2.5 text-right font-semibold uppercase tracking-wide text-slate-400">
+                        Gap
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map((r) => (
+                      <motion.tr
+                        key={r.item.key}
+                        layout={!reduce}
+                        initial={reduce ? undefined : { opacity: 0, y: 6 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        transition={{ duration: 0.3 }}
+                        onClick={() => onOpenItem(r.item.key)}
+                        className="group cursor-pointer border-b border-slate-900/5 transition-colors last:border-0 hover:bg-emerald-500/[0.045] dark:border-white/4 dark:hover:bg-emerald-400/[0.04]"
+                      >
+                        <td className="sticky left-0 z-10 bg-mist-50 px-4 py-2.5 transition-colors group-hover:bg-[#eef6f1] dark:bg-night-900 dark:group-hover:bg-[#0d1a24]">
+                          <p className="text-[13px] font-bold leading-tight text-slate-800 dark:text-slate-100">
+                            {r.item.name}
+                          </p>
+                          <p className="mt-0.5 flex items-center gap-1.5 text-[10.5px] text-slate-400">
+                            {r.item.brand && <span className="font-semibold">{r.item.brand}</span>}
+                            <span className="capitalize">{r.item.cat}</span>
+                          </p>
+                        </td>
+                        {r.cells.map((c) => {
+                          const has = c.price > 0 || c.unit !== "";
+                          if (!has)
+                            return (
+                              <td key={c.storeId} className="px-3 py-2.5 text-[11px] text-slate-300 dark:text-slate-600">
+                                —
+                              </td>
+                            );
+                          return (
+                            <td key={c.storeId} className="px-3 py-2.5">
+                              <div
+                                className={`relative rounded-lg px-2 py-1.5 transition-transform duration-200 group-hover:scale-[1.015] ${
+                                  c.isBest
+                                    ? "bg-emerald-500/12 ring-1 ring-inset ring-emerald-500/35"
+                                    : c.isSpike
+                                      ? "bg-rose-500/10 ring-1 ring-inset ring-rose-500/30"
+                                      : ""
+                                }`}
+                              >
+                                <p className="num text-[12.5px] font-bold text-slate-900 dark:text-white">
+                                  {mode === "norm" ? fmtPerBase(c.pb) : fmtMoney(c.price)}
+                                </p>
+                                <p className="num mt-0.5 text-[10px] font-medium text-slate-400">
+                                  {mode === "norm"
+                                    ? `${fmtMoney(c.price)} · ${c.qty}${c.unit}`
+                                    : `${c.qty}${c.unit} · ${fmtPerBase(c.pb)}`}
+                                </p>
+                                <p
+                                  className={`num mt-0.5 flex items-center gap-1 text-[10px] font-bold ${
+                                    c.isBest
+                                      ? "text-emerald-600 dark:text-emerald-300"
+                                      : c.pct >= 8
+                                        ? "text-rose-500"
+                                        : c.pct <= -3
+                                          ? "text-emerald-500"
+                                          : "text-slate-400"
+                                  }`}
+                                >
+                                  {c.isBest ? (
+                                    <>
+                                      <Award className="h-3 w-3" /> Best value
+                                    </>
+                                  ) : (
+                                    <>{c.pct > 0 ? "+" : ""}{c.pct.toFixed(0)}% vs avg</>
+                                  )}
+                                </p>
+                              </div>
+                            </td>
+                          );
+                        })}
+                        <td className="px-3 py-2.5 text-right">
+                          <span
+                            className={`num text-[12px] font-bold ${
+                              r.gapPct >= 25 ? "text-rose-500" : r.gapPct >= 12 ? "text-amber-500" : "text-slate-400"
+                            }`}
+                          >
+                            {r.gapPct.toFixed(0)}%
+                          </span>
+                        </td>
+                      </motion.tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </Reveal>
+
+        {/* ------- radar + champions ------- */}
+        <div className="space-y-5">
+          <Reveal delay={0.12}>
+            <div className="card p-4">
+              <div className="mb-1 flex items-center gap-2">
+                <RadarIcon className="h-4 w-4 text-emerald-500" />
+                <h3 className="font-display text-[15px] font-bold tracking-tight text-slate-900 dark:text-white">
+                  Category price radar
+                </h3>
+              </div>
+              <p className="mb-2 text-[11px] text-slate-500">
+                Worthey index by aisle — the fatter the shape, the cheaper the store. 100 = best value.
+              </p>
+              <div className="h-[260px] text-slate-400">
+                <ResponsiveContainer width="100%" height="100%">
+                  <RadarChart data={radarData} outerRadius="74%">
+                    <PolarGrid stroke="currentColor" strokeOpacity={0.14} />
+                    <PolarAngleAxis dataKey="cat" tick={{ fontSize: 10, fill: "currentColor", opacity: 0.7 }} />
+                    <PolarRadiusAxis domain={[70, 100]} tick={{ fontSize: 8, fill: "currentColor", opacity: 0.5 }} axisLine={false} />
+                    <Tooltip content={<RadarTip />} />
+                    {STORES.map((s) => (
+                      <RechartsRadar
+                        key={s.id}
+                        name={s.name}
+                        dataKey={s.id}
+                        stroke={s.color}
+                        strokeWidth={1.8}
+                        fill={s.color}
+                        fillOpacity={0.09}
+                        isAnimationActive={!reduce}
+                        animationDuration={900}
+                      />
+                    ))}
+                  </RadarChart>
+                </ResponsiveContainer>
+              </div>
+              <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1">
+                {STORES.map((s) => (
+                  <span key={s.id} className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-500">
+                    <span className="h-1.5 w-4 rounded-full" style={{ background: s.color }} />
+                    {s.name}
+                  </span>
+                ))}
+              </div>
+            </div>
+          </Reveal>
+
+          <Reveal delay={0.16}>
+            <div className="card p-4">
+              <div className="mb-3 flex items-center gap-2">
+                <StoreIcon className="h-4 w-4 text-emerald-500" />
+                <h3 className="font-display text-[15px] font-bold tracking-tight text-slate-900 dark:text-white">
+                  Overall affordability
+                </h3>
+              </div>
+              <div className="space-y-3">
+                {ranking.map((r) => (
+                  <div key={r.store.id}>
+                    <div className="mb-1 flex items-center justify-between text-[12px]">
+                      <span className="flex items-center gap-2 font-bold text-slate-700 dark:text-slate-200">
+                        <span
+                          className={`num grid h-5 w-5 place-items-center rounded-md text-[10px] font-bold ${
+                            r.rank === 0
+                              ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-300"
+                              : "bg-slate-500/10 text-slate-500"
+                          }`}
+                        >
+                          {r.rank + 1}
+                        </span>
+                        <span className="h-2 w-2 rounded-full" style={{ background: r.store.color }} />
+                        {r.store.name}
+                        {r.rank === 0 && <Badge tone="emerald"><Award className="h-3 w-3" /> champion</Badge>}
+                      </span>
+                      <span className="num font-bold text-slate-900 dark:text-white">{r.score.toFixed(1)}</span>
+                    </div>
+                    <Meter
+                      value={((r.score - 70) / 30) * 100}
+                      color={r.store.color}
+                    />
+                  </div>
+                ))}
+              </div>
+              <p className="mt-3 text-[10.5px] leading-relaxed text-slate-400">
+                Mean Worthey index across all {state.catalog.length} tracked products. A score of 100 means the store
+                is cheapest on every shelf it stocks.
+              </p>
+            </div>
+          </Reveal>
+        </div>
+      </div>
+    </div>
+  );
+}
